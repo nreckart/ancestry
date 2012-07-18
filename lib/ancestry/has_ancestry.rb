@@ -1,13 +1,9 @@
-require 'ancestry/class_methods'
-require 'ancestry/instance_methods'
-require 'ancestry/exceptions'
-
 class << ActiveRecord::Base
   def has_ancestry options = {}
     # Check options
     raise Ancestry::AncestryException.new("Options for has_ancestry must be in a hash.") unless options.is_a? Hash
     options.each do |key, value|
-      unless [:ancestry_column, :orphan_strategy, :cache_depth, :depth_cache_column, :primary_key_format].include? key
+      unless [:ancestry_column, :orphan_strategy, :cache_depth, :depth_cache_column].include? key
         raise Ancestry::AncestryException.new("Unknown option for has_ancestry: #{key.inspect} => #{value.inspect}.")
       end
     end
@@ -31,28 +27,20 @@ class << ActiveRecord::Base
     self.base_class = self
     
     # Validate format of ancestry column value
-    primary_key_format = options[:primary_key_format] || /[0-9]+/
-    validates_format_of ancestry_column, :with => /\A#{primary_key_format.source}(\/#{primary_key_format.source})*\Z/, :allow_nil => true
+    validates_format_of ancestry_column, :with => Ancestry::ANCESTRY_PATTERN, :allow_nil => true
 
     # Validate that the ancestor ids don't include own id
     validate :ancestry_exclude_self
     
-    # Save ActiveRecord version
-    self.cattr_accessor :rails_3
-    self.rails_3 = defined?(ActiveRecord::VERSION) && ActiveRecord::VERSION::MAJOR >= 3
-    
-    # Workaround to support Rails 2
-    scope_method = if rails_3 then :scope else :named_scope end
-
     # Named scopes
-    send scope_method, :roots, :conditions => {ancestry_column => nil}
-    send scope_method, :ancestors_of, lambda { |object| {:conditions => to_node(object).ancestor_conditions} }
-    send scope_method, :children_of, lambda { |object| {:conditions => to_node(object).child_conditions} }
-    send scope_method, :descendants_of, lambda { |object| {:conditions => to_node(object).descendant_conditions} }
-    send scope_method, :subtree_of, lambda { |object| {:conditions => to_node(object).subtree_conditions} }
-    send scope_method, :siblings_of, lambda { |object| {:conditions => to_node(object).sibling_conditions} }
-    send scope_method, :ordered_by_ancestry, :order => "(case when #{table_name}.#{ancestry_column} is null then 0 else 1 end), #{table_name}.#{ancestry_column}"
-    send scope_method, :ordered_by_ancestry_and, lambda { |order| {:order => "(case when #{table_name}.#{ancestry_column} is null then 0 else 1 end), #{table_name}.#{ancestry_column}, #{order}"} }
+    scope :roots, :conditions => {ancestry_column => nil}
+    scope :ancestors_of, lambda { |object| {:conditions => to_node(object).ancestor_conditions} }
+    scope :children_of, lambda { |object| {:conditions => to_node(object).child_conditions} }
+    scope :descendants_of, lambda { |object| {:conditions => to_node(object).descendant_conditions} }
+    scope :subtree_of, lambda { |object| {:conditions => to_node(object).subtree_conditions} }
+    scope :siblings_of, lambda { |object| {:conditions => to_node(object).sibling_conditions} }
+    scope :ordered_by_ancestry, reorder("(case when #{table_name}.#{ancestry_column} is null then 0 else 1 end), #{table_name}.#{ancestry_column}")
+    scope :ordered_by_ancestry_and, lambda { |order| reorder("(case when #{table_name}.#{ancestry_column} is null then 0 else 1 end), #{table_name}.#{ancestry_column}, #{order}") }
     
     # Update descendants with new ancestry before save
     before_save :update_descendants_with_new_ancestry
@@ -76,7 +64,7 @@ class << ActiveRecord::Base
     
     # Create named scopes for depth
     {:before_depth => '<', :to_depth => '<=', :at_depth => '=', :from_depth => '>=', :after_depth => '>'}.each do |scope_name, operator|
-      send scope_method, scope_name, lambda { |depth|
+      scope scope_name, lambda { |depth|
         raise Ancestry::AncestryException.new("Named scope '#{scope_name}' is only available when depth caching is enabled.") unless options[:cache_depth]
         {:conditions => ["#{depth_cache_column} #{operator} ?", depth]}
       }

@@ -2,17 +2,17 @@ module Ancestry
   module InstanceMethods
     # Validate that the ancestors don't include itself
     def ancestry_exclude_self
-      add_error_to_base "#{self.class.name.humanize} cannot be a descendant of itself." if ancestor_ids.include? self.id
+      errors.add(:base, "#{self.class.name.humanize} cannot be a descendant of itself.") if ancestor_ids.include? self.id
     end
 
     # Update descendants with new ancestry
     def update_descendants_with_new_ancestry
       # Skip this if callbacks are disabled
       unless ancestry_callbacks_disabled?
-        # If node is valid, not a new record and ancestry was updated ...
-        if changed.include?(self.base_class.ancestry_column.to_s) && !new_record? && valid?
+        # If node is not a new record and ancestry was updated and the new ancestry is sane ...
+        if changed.include?(self.base_class.ancestry_column.to_s) && !new_record? && sane_ancestry?
           # ... for each descendant ...
-          descendants.each do |descendant|
+          unscoped_descendants.each do |descendant|
             # ... replace old ancestry with new ancestry
             descendant.without_ancestry_callbacks do
               descendant.update_attribute(
@@ -27,25 +27,33 @@ module Ancestry
         end
       end
     end
-
+     
     # Apply orphan strategy
     def apply_orphan_strategy
       # Skip this if callbacks are disabled
       unless ancestry_callbacks_disabled?
         # If this isn't a new record ...
         unless new_record?
-          # ... make al children root if orphan strategy is rootify
+          # ... make all children root if orphan strategy is rootify
           if self.base_class.orphan_strategy == :rootify
-            descendants.each do |descendant|
+            unscoped_descendants.each do |descendant|
               descendant.without_ancestry_callbacks do
                 descendant.update_attribute descendant.class.ancestry_column, (if descendant.ancestry == child_ancestry then nil else descendant.ancestry.gsub(/^#{child_ancestry}\//, '') end)
               end
             end
           # ... destroy all descendants if orphan strategy is destroy
           elsif self.base_class.orphan_strategy == :destroy
-            descendants.all.each do |descendant|
+            unscoped_descendants.each do |descendant|
               descendant.without_ancestry_callbacks do
                 descendant.destroy
+              end
+            end
+          # ... make child elements of this node, child of its parent if orphan strategy is adopt
+          elsif self.base_class.orphan_strategy == :adopt
+            descendants.all.each do |descendant|
+              descendant.without_ancestry_callbacks do
+                new_ancestry = descendant.ancestor_ids.delete_if { |x| x == self.id }.join("/")
+                descendant.update_attribute descendant.class.ancestry_column, new_ancestry || nil
               end
             end
           # ... throw an exception if it has children and orphan strategy is restrict
@@ -103,7 +111,7 @@ module Ancestry
     end
 
     def parent_id= parent_id
-      self.parent = if parent_id.blank? then nil else self.base_class.find(parent_id) end
+      self.parent = if parent_id.blank? then nil else unscoped_find(parent_id) end
     end
 
     def parent_id
@@ -111,7 +119,7 @@ module Ancestry
     end
 
     def parent
-      if parent_id.blank? then nil else self.base_class.find(parent_id) end
+      if parent_id.blank? then nil else unscoped_find(parent_id) end
     end
 
     # Root
@@ -120,7 +128,7 @@ module Ancestry
     end
 
     def root
-      if root_id == id then self else self.base_class.find(root_id) end
+      if root_id == id then self else unscoped_find(root_id) end
     end
 
     def is_root?
@@ -159,7 +167,7 @@ module Ancestry
     end
 
     def sibling_ids
-       siblings.all(:select => self.base_class.primary_key).collect(&self.base_class.primary_key.to_sym)
+      siblings.all(:select => self.base_class.primary_key).collect(&self.base_class.primary_key.to_sym)
     end
 
     def has_siblings?
@@ -209,15 +217,6 @@ module Ancestry
 
   private
 
-    # Workaround to support Rails 2
-    def add_error_to_base error
-      if rails_3
-        errors[:base] << error
-      else
-        errors.add_to_base error
-      end
-    end
-
     def cast_primary_key(key)
       if primary_key_type == :string
         key
@@ -228,6 +227,21 @@ module Ancestry
 
     def primary_key_type
       @primary_key_type ||= column_for_attribute(self.class.primary_key).type
+    end
+    def unscoped_descendants
+      self.base_class.unscoped do
+        self.base_class.all(:conditions => descendant_conditions) 
+      end
+    end
+    
+    # basically validates the ancestry, but also applied if validation is
+    # bypassed to determine if chidren should be affected
+    def sane_ancestry?
+      ancestry.nil? || (ancestry.to_s =~ Ancestry::ANCESTRY_PATTERN && !ancestor_ids.include?(self.id))
+    end
+    
+    def unscoped_find id
+      self.base_class.unscoped { self.base_class.find(id) }
     end
   end
 end
